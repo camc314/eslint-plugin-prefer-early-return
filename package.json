@@ -1,0 +1,29 @@
+{
+    "name": "eslint-plugin-prefer-early-return",
+    "version": "1.0.0",
+    "description": "Oxlint rule to prefer early returns over deeply nested if-else chains",
+    "main": "dist/index.mjs",
+    "type": "module",
+    "scripts": {
+        "build": "tsdown",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "typecheck": "tsc --noEmit"
+    },
+    "keywords": [
+        "eslint",
+        "eslint-plugin",
+        "oxlint",
+        "early-return",
+        "guard-clause"
+    ],
+    "author": "",
+    "devDependencies": {
+        "tsdown": "^0.17.0",
+        "typescript": "^5.9.3",
+        "vitest": "^4.0.15"
+    },
+    "dependencies": {
+        "oxlint": "^1.31.0"
+    }
+}
