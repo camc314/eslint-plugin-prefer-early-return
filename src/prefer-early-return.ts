@@ -1,7 +1,8 @@
-import { defineRule, type ESTree } from 'oxlint';
+import { defineRule, type ESTree, type SourceCode, type Fixer, type Fix } from 'oxlint';
 
 type IfStatement = ESTree.IfStatement;
 type Statement = ESTree.Statement;
+type Expression = ESTree.Expression;
 
 /**
  * Gets the statements from a block statement or wraps a single statement.
@@ -169,9 +170,239 @@ function shouldReportEarlyReturn(node: IfStatement): boolean {
     return false;
 }
 
+/**
+ * Gets the simple exit statement from a block or statement.
+ */
+function getSimpleExitStatement(statement: Statement): Statement {
+    if (statement.type === 'BlockStatement' && statement.body.length === 1) {
+        return getSimpleExitStatement(statement.body[0]);
+    }
+    return statement;
+}
+
+/**
+ * Inverts a condition expression and returns the string representation.
+ * Handles common cases like:
+ * - `a` -> `!a`
+ * - `!a` -> `a`
+ * - `a === b` -> `a !== b`
+ * - `a !== b` -> `a === b`
+ * - `a == b` -> `a != b`
+ * - `a != b` -> `a == b`
+ */
+function invertCondition(condition: Expression, sourceCode: SourceCode): string {
+    const conditionText = sourceCode.getText(condition);
+
+    // Handle UnaryExpression with ! operator
+    if (condition.type === 'UnaryExpression' && condition.operator === '!') {
+        // !a -> a (but need parens if it's a complex expression)
+        const argument = condition.argument;
+        if (
+            argument.type === 'Identifier' ||
+            argument.type === 'MemberExpression' ||
+            argument.type === 'CallExpression'
+        ) {
+            return sourceCode.getText(argument);
+        }
+        // For complex expressions, wrap in parens
+        return `(${sourceCode.getText(argument)})`;
+    }
+
+    // Handle BinaryExpression with equality operators
+    if (condition.type === 'BinaryExpression') {
+        const left = sourceCode.getText(condition.left);
+        const right = sourceCode.getText(condition.right);
+
+        switch (condition.operator) {
+            case '===':
+                return `${left} !== ${right}`;
+            case '!==':
+                return `${left} === ${right}`;
+            case '==':
+                return `${left} != ${right}`;
+            case '!=':
+                return `${left} == ${right}`;
+            case '<':
+                return `${left} >= ${right}`;
+            case '<=':
+                return `${left} > ${right}`;
+            case '>':
+                return `${left} <= ${right}`;
+            case '>=':
+                return `${left} < ${right}`;
+        }
+    }
+
+    // Default: wrap in !()
+    // For simple identifiers and member expressions, just use !
+    if (
+        condition.type === 'Identifier' ||
+        condition.type === 'MemberExpression' ||
+        condition.type === 'CallExpression'
+    ) {
+        return `!${conditionText}`;
+    }
+
+    return `!(${conditionText})`;
+}
+
+/**
+ * Converts an exit statement to a return statement if needed.
+ * - ReturnStatement stays as is
+ * - ThrowStatement stays as is
+ * - ExpressionStatement becomes `return <expression>;`
+ */
+function convertToEarlyReturn(statement: Statement, sourceCode: SourceCode): string {
+    const exitStmt = getSimpleExitStatement(statement);
+
+    if (exitStmt.type === 'ReturnStatement' || exitStmt.type === 'ThrowStatement') {
+        return sourceCode.getText(exitStmt);
+    }
+
+    if (exitStmt.type === 'ExpressionStatement') {
+        const exprText = sourceCode.getText(exitStmt.expression);
+        return `return ${exprText};`;
+    }
+
+    return sourceCode.getText(exitStmt);
+}
+
+/**
+ * Gets the indentation of a node based on its position.
+ */
+function getIndentation(node: ESTree.Node, sourceCode: SourceCode): string {
+    const text = sourceCode.getText();
+    const start = node.start;
+
+    // Find the start of the line
+    let lineStart = start;
+    while (lineStart > 0 && text[lineStart - 1] !== '\n') {
+        lineStart--;
+    }
+
+    // Extract the whitespace at the start of the line
+    let indent = '';
+    for (let i = lineStart; i < start; i++) {
+        if (text[i] === ' ' || text[i] === '\t') {
+            indent += text[i];
+        } else {
+            break;
+        }
+    }
+
+    return indent;
+}
+
+/**
+ * Recursively flattens nested if-else chains into early returns.
+ */
+function flattenIfElseChain(
+    node: IfStatement,
+    sourceCode: SourceCode,
+    baseIndent: string
+): string {
+    const parts: string[] = [];
+
+    let current: IfStatement | null = node;
+
+    while (current) {
+        if (current.alternate && isSimpleExit(current.alternate)) {
+            // Convert: if (cond) { ... } else { return error; }
+            // To: if (!cond) return error;
+            const invertedCond = invertCondition(current.test, sourceCode);
+            const earlyReturn = convertToEarlyReturn(current.alternate, sourceCode);
+            parts.push(`${baseIndent}if (${invertedCond}) ${earlyReturn}`);
+
+            // Now process the consequent
+            const consequentStmts = getBlockStatements(current.consequent);
+
+            for (const stmt of consequentStmts) {
+                if (stmt.type === 'IfStatement' && stmt.alternate && isSimpleExit(stmt.alternate)) {
+                    // Recursively flatten nested if-else
+                    parts.push(flattenIfElseChain(stmt, sourceCode, baseIndent));
+                } else if (stmt.type === 'IfStatement' && !stmt.alternate) {
+                    // if without else - check if it has nested if-else inside
+                    const nestedStmts = getBlockStatements(stmt.consequent);
+                    const hasNestedIfElse = nestedStmts.some(
+                        s => s.type === 'IfStatement' && s.alternate && isSimpleExit(s.alternate)
+                    );
+
+                    if (hasNestedIfElse) {
+                        parts.push(flattenIfElseChain(stmt, sourceCode, baseIndent));
+                    } else {
+                        // Keep as is but re-indent
+                        parts.push(`${baseIndent}${sourceCode.getText(stmt)}`);
+                    }
+                } else {
+                    // Regular statement - keep as is but re-indent
+                    const stmtText = sourceCode.getText(stmt);
+                    parts.push(`${baseIndent}${stmtText}`);
+                }
+            }
+
+            current = null;
+        } else if (!current.alternate) {
+            // No else branch - check for nested if-else in consequent
+            const consequentStmts = getBlockStatements(current.consequent);
+            const nestedIfElse = consequentStmts.find(
+                s => s.type === 'IfStatement' && s.alternate && isSimpleExit(s.alternate)
+            ) as IfStatement | undefined;
+
+            if (nestedIfElse) {
+                // Convert the outer if to a guard clause
+                const invertedCond = invertCondition(current.test, sourceCode);
+                parts.push(`${baseIndent}if (${invertedCond}) return;`);
+
+                // Process the consequent statements
+                for (const stmt of consequentStmts) {
+                    if (stmt.type === 'IfStatement' && stmt.alternate && isSimpleExit(stmt.alternate)) {
+                        parts.push(flattenIfElseChain(stmt, sourceCode, baseIndent));
+                    } else if (stmt.type === 'IfStatement') {
+                        const nestedStmts = getBlockStatements(stmt.consequent);
+                        const hasNestedIfElse = nestedStmts.some(
+                            s => s.type === 'IfStatement' && s.alternate && isSimpleExit(s.alternate)
+                        );
+
+                        if (hasNestedIfElse) {
+                            parts.push(flattenIfElseChain(stmt, sourceCode, baseIndent));
+                        } else {
+                            parts.push(`${baseIndent}${sourceCode.getText(stmt)}`);
+                        }
+                    } else {
+                        const stmtText = sourceCode.getText(stmt);
+                        parts.push(`${baseIndent}${stmtText}`);
+                    }
+                }
+            }
+
+            current = null;
+        } else {
+            // Has else but it's not a simple exit - can't flatten further
+            current = null;
+        }
+    }
+
+    return parts.join('\n');
+}
+
+/**
+ * Creates a fix for the if-else chain.
+ */
+function createFix(
+    node: IfStatement,
+    sourceCode: SourceCode,
+    fixer: Fixer
+): Fix {
+    const indent = getIndentation(node, sourceCode);
+    const fixedCode = flattenIfElseChain(node, sourceCode, indent);
+
+    return fixer.replaceText(node, fixedCode);
+}
+
 export const preferEarlyReturnRule = defineRule({
     meta: {
         type: 'suggestion',
+        fixable: 'code',
         docs: {
             description:
                 'Prefer early returns to reduce nesting and improve code readability',
@@ -184,6 +415,8 @@ export const preferEarlyReturnRule = defineRule({
         schema: [],
     },
     create(context) {
+        const sourceCode = context.sourceCode;
+
         return {
             IfStatement(node: ESTree.Node) {
                 const ifNode = node as IfStatement;
@@ -191,6 +424,9 @@ export const preferEarlyReturnRule = defineRule({
                     context.report({
                         node,
                         messageId: 'preferEarlyReturn',
+                        fix(fixer) {
+                            return createFix(ifNode, sourceCode, fixer);
+                        },
                     });
                 }
             },

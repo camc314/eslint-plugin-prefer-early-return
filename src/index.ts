@@ -11,3 +11,5 @@ export const plugin = definePlugin({
 });
 
 export { preferEarlyReturnRule };
+
+export default plugin;

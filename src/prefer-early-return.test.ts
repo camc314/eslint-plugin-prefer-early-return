@@ -385,5 +385,154 @@ ruleTester.run('prefer-early-return', preferEarlyReturnRule, {
             }`,
             errors: [{ messageId: 'preferEarlyReturn' }],
         },
+
+        // ===== FIXER TESTS =====
+
+        // Simple if-else with return in else
+        {
+            code: `function foo() {
+    if (user) {
+        if (valid) {
+            doWork();
+        } else {
+            return error();
+        }
+    } else {
+        return unauthorized();
+    }
+}`,
+            output: `function foo() {
+    if (!user) return unauthorized();
+    if (!valid) return error();
+    doWork();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Inverting !== to ===
+        {
+            code: `function foo() {
+    if (a !== b) {
+        if (c) {
+            work();
+        } else {
+            return;
+        }
+    } else {
+        return;
+    }
+}`,
+            output: `function foo() {
+    if (a === b) return;
+    if (!c) return;
+    work();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Inverting === to !==
+        {
+            code: `function foo() {
+    if (a === b) {
+        if (c) {
+            work();
+        } else {
+            return;
+        }
+    } else {
+        return;
+    }
+}`,
+            output: `function foo() {
+    if (a !== b) return;
+    if (!c) return;
+    work();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Inverting !condition to condition
+        {
+            code: `function foo() {
+    if (!invalid) {
+        if (ready) {
+            run();
+        } else {
+            return;
+        }
+    } else {
+        return;
+    }
+}`,
+            output: `function foo() {
+    if (invalid) return;
+    if (!ready) return;
+    run();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Expression statement in else converted to return
+        {
+            code: `function handle(res) {
+    if (user) {
+        if (data) {
+            res.json(data);
+        } else {
+            res.status(404).send("Not found");
+        }
+    } else {
+        res.status(401).send("Unauthorized");
+    }
+}`,
+            output: `function handle(res) {
+    if (!user) return res.status(401).send("Unauthorized");
+    if (!data) return res.status(404).send("Not found");
+    res.json(data);
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Throw statement preserved
+        {
+            code: `function foo() {
+    if (valid) {
+        if (ready) {
+            process();
+        } else {
+            throw new Error("Not ready");
+        }
+    } else {
+        throw new Error("Invalid");
+    }
+}`,
+            output: `function foo() {
+    if (!valid) throw new Error("Invalid");
+    if (!ready) throw new Error("Not ready");
+    process();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
+
+        // Comparison operators inverted
+        {
+            code: `function foo() {
+    if (x > 0) {
+        if (y < 10) {
+            work();
+        } else {
+            return;
+        }
+    } else {
+        return;
+    }
+}`,
+            output: `function foo() {
+    if (x <= 0) return;
+    if (y >= 10) return;
+    work();
+}`,
+            errors: [{ messageId: 'preferEarlyReturn' }],
+        },
     ],
 });
